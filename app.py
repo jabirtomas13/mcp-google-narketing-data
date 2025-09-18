@@ -123,7 +123,7 @@ def get_search_console_ctr(site_url, start_date, end_date, query_filter=None):
             'startDate': start_date,
             'endDate': end_date,
             'dimensions': ['query'],
-            'rowLimit': 50,
+            'rowLimit': 1000,  # Aumentar límite para obtener más datos
         }
         if query_filter:
             request['dimensionFilterGroups'] = [{
@@ -140,11 +140,16 @@ def get_search_console_ctr(site_url, start_date, end_date, query_filter=None):
         if not rows:
             return pd.DataFrame()
         
-        # Procesar los datos
+        # Procesar los datos de manera más robusta
         data = []
         for row in rows:
+            # Verificar que existan las claves antes de acceder
+            keys = row.get('keys', [])
+            if not keys:
+                continue
+                
             data.append({
-                'query': row.get('keys', [''])[0] if row.get('keys') else '',
+                'query': keys[0] if keys else '',
                 'clicks': row.get('clicks', 0),
                 'impressions': row.get('impressions', 0),
                 'ctr': round(row.get('ctr', 0) * 100, 2),  # Convertir a porcentaje
@@ -152,6 +157,10 @@ def get_search_console_ctr(site_url, start_date, end_date, query_filter=None):
             })
         
         df = pd.DataFrame(data)
+        # Filtrar filas vacías
+        df = df[df['query'].str.len() > 0]
+        # Ordenar por clics descendente por defecto
+        df = df.sort_values('clicks', ascending=False).reset_index(drop=True)
         return df
         
     except Exception as e:
@@ -164,9 +173,18 @@ def get_user_sites():
         service = build('searchconsole', 'v1', credentials=google_creds)
         response = service.sites().list().execute()
         sites = response.get('siteEntry', [])
-        return [site['siteUrl'] for site in sites if site.get('permissionLevel') in ['siteOwner', 'siteFullUser']]
+        verified_sites = [site['siteUrl'] for site in sites if site.get('permissionLevel') in ['siteOwner', 'siteFullUser']]
+        return verified_sites
     except Exception as e:
-        st.error(f"Error al obtener propiedades: {str(e)}")
+        # Errores comunes y sus soluciones
+        if "403" in str(e):
+            st.error("❌ Error 403: Sin permisos para acceder a Search Console")
+            st.info("Verifica que el email del Service Account tenga acceso a la propiedad en Search Console")
+        elif "401" in str(e):
+            st.error("❌ Error 401: Credenciales inválidas")
+            st.info("Verifica que las credenciales del Service Account sean correctas")
+        else:
+            st.error(f"Error al obtener propiedades: {str(e)}")
         return []
 
 # --- DEFINICIÓN DE FUNCIONES PARA LLM ---
@@ -202,16 +220,25 @@ functions = [
 # --- INTERFAZ PRINCIPAL ---
 st.header("🔍 Análisis de Search Console")
 
+# Validar que las credenciales estén configuradas antes de continuar
+if not google_creds:
+    st.warning("⚠️ Configura primero las credenciales de Google en la barra lateral")
+    st.stop()
+
 # Obtener propiedades del usuario
-user_sites = get_user_sites()
+with st.spinner("🔄 Cargando propiedades de Search Console..."):
+    user_sites = get_user_sites()
 
 col1, col2 = st.columns([2, 1])
 
 with col1:
     if user_sites:
         site_url = st.selectbox("Selecciona una propiedad:", user_sites)
+        st.success(f"✅ {len(user_sites)} propiedades disponibles")
     else:
-        site_url = st.text_input("URL de la propiedad:", placeholder="https://example.com/")
+        st.warning("⚠️ No se encontraron propiedades o hay un error de configuración")
+        site_url = st.text_input("URL manual de la propiedad:", placeholder="https://example.com/")
+        st.info("Asegúrate de que el Service Account tenga acceso a la propiedad en Search Console")
 
 with col2:
     # Botón para refrescar propiedades
@@ -239,9 +266,19 @@ if periodo_predefinido != "Personalizado":
         st.info(f"Al {end_date}")
 else:
     with col4:
-        start_date = st.date_input("Fecha de inicio").isoformat()
+        start_date_input = st.date_input("Fecha de inicio", value=datetime.today().date() - timedelta(days=30))
+        start_date = str(start_date_input)
     with col5:
-        end_date = st.date_input("Fecha de fin").isoformat()
+        end_date_input = st.date_input("Fecha de fin", value=datetime.today().date())
+        end_date = str(end_date_input)
+    
+    # Validar fechas
+    if start_date_input > end_date_input:
+        st.error("❌ La fecha de inicio debe ser anterior a la fecha de fin")
+    elif (end_date_input - start_date_input).days > 365:
+        st.warning("⚠️ Se recomienda usar rangos menores a 1 año para mejor rendimiento")
+    elif (datetime.today().date() - end_date_input).days < 3:
+        st.info("ℹ️ Los datos de Search Console pueden tener 2-3 días de retraso")
 
 # --- CONSULTA PRINCIPAL ---
 st.subheader("💬 Haz tu consulta")
