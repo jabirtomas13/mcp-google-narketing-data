@@ -60,7 +60,7 @@ with st.sidebar:
     # Validar credenciales de Google
     google_creds = None
     if json_credentials.strip():
-        try:
+        with st.spinner("🤖 Analizando con IA..."):
             service_account_info = json.loads(json_credentials)
             google_creds = service_account.Credentials.from_service_account_info(
                 service_account_info,
@@ -270,19 +270,95 @@ with col6:
 with col7:
     max_results = st.slider("Máximo resultados:", 10, 100, 20)
 
-# --- PROCESO PRINCIPAL ---
-if query and query.strip() and site_url:
-    with st.spinner("🤖 Analizando con IA..."):
+# --- BOTONES DE ACCIÓN ---
+col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+
+with col_btn1:
+    analyze_button = st.button("🤖 Analizar con IA", type="primary")
+
+with col_btn2:
+    direct_query = st.button("📊 Consulta directa")
+
+with col_btn3:
+    if st.button("🔄 Consulta de prueba"):
+        query = "¿Cuáles son las 10 consultas con mayor CTR?"
+        st.rerun()
+if (analyze_button or direct_query) and query and query.strip() and site_url:
+    # Consulta directa sin IA
+    if direct_query:
+        with st.spinner("📊 Obteniendo datos directamente..."):
+            df_result = get_search_console_ctr(
+                site_url=site_url,
+                start_date=start_date,
+                end_date=end_date,
+                query_filter=None  # Sin filtro para consulta directa
+            )
+            
+            if df_result.empty:
+                st.warning("⚠️ No se encontraron datos para los criterios especificados")
+            else:
+                st.success(f"✅ Datos obtenidos: {len(df_result)} consultas")
+                
+                # Mostrar métricas y visualización (reutilizar código existente)
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("📊 Total Consultas", len(df_result))
+                with col2:
+                    st.metric("👆 Total Clics", f"{int(df_result['clicks'].sum()):,}")
+                with col3:
+                    st.metric("👀 Total Impresiones", f"{int(df_result['impressions'].sum()):,}")
+                with col4:
+                    avg_ctr = df_result['ctr'].mean()
+                    st.metric("📈 CTR Promedio", f"{avg_ctr:.2f}%")
+                
+                # Respuesta simple para la consulta directa
+                if "mayor CTR" in query.lower() or "mejor CTR" in query.lower():
+                    top_ctr = df_result.nlargest(10, 'ctr')
+                    st.subheader("🏆 Top 10 consultas con mayor CTR:")
+                    st.dataframe(top_ctr[['query', 'ctr', 'clicks', 'position']], use_container_width=True)
+                
+                elif "más clics" in query.lower() or "mayor tráfico" in query.lower():
+                    top_clicks = df_result.nlargest(10, 'clicks')
+                    st.subheader("🚀 Top 10 consultas con más clics:")
+                    st.dataframe(top_clicks[['query', 'clicks', 'ctr', 'position']], use_container_width=True)
+                
+                elif "mejor posición" in query.lower() or "posición" in query.lower():
+                    top_position = df_result.nsmallest(10, 'position')
+                    st.subheader("📈 Top 10 consultas con mejor posición:")
+                    st.dataframe(top_position[['query', 'position', 'clicks', 'ctr']], use_container_width=True)
+                
+                else:
+                    # Mostrar datos generales ordenados por clics
+                    df_display = df_result.head(max_results)
+                    st.subheader("📈 Resultados generales:")
+                    st.dataframe(df_display, use_container_width=True)
+    
+    # Análisis con IA
+    elif analyze_button:
         try:
-            # Usar la nueva API de OpenAI
+            try:
             from openai import OpenAI
             client = OpenAI(api_key=openai_key)
             
+            # Crear un prompt más específico que incluya el contexto
+            enhanced_prompt = f"""
+            Tengo una propiedad de Search Console en: {site_url}
+            Quiero analizar datos del {start_date} al {end_date}
+            
+            Pregunta del usuario: {query}
+            
+            Para responder a esta pregunta, necesitas usar la función get_search_console_ctr con los parámetros apropiados.
+            Si la pregunta menciona filtros específicos (como palabras clave), úsalos en query_filter.
+            """
+            
             response = client.chat.completions.create(
                 model="gpt-4-0613",
-                messages=[{"role": "user", "content": query}],
+                messages=[
+                    {"role": "system", "content": "Eres un analista de datos especializado en Search Console. Siempre debes usar las funciones disponibles para obtener datos reales antes de responder preguntas sobre métricas de búsqueda."},
+                    {"role": "user", "content": enhanced_prompt}
+                ],
                 tools=[{"type": "function", "function": func} for func in functions],
-                tool_choice="auto"
+                tool_choice={"type": "function", "function": {"name": "get_search_console_ctr"}}
             )
 
             # Verificar si se debe llamar a una función
@@ -375,6 +451,29 @@ if query and query.strip() and site_url:
                                 height=400
                             )
                             st.altair_chart(chart, use_container_width=True)
+                        
+                    # Generar respuesta interpretativa después de obtener datos
+                    if not df_result.empty:
+                        # Análisis automático basado en la consulta
+                        analysis_prompt = f"""
+                        Basándote en estos datos de Search Console, responde a la pregunta: "{query}"
+                        
+                        Datos obtenidos:
+                        - Total de consultas analizadas: {len(df_result)}
+                        - CTR promedio: {df_result['ctr'].mean():.2f}%
+                        - Total de clics: {df_result['clicks'].sum()}
+                        - Posición promedio: {df_result['position'].mean():.1f}
+                        
+                        Top 5 consultas por CTR:
+                        {df_result.nlargest(5, 'ctr')[['query', 'ctr', 'clicks', 'position']].to_string()}
+                        
+                        Proporciona un análisis conciso y accionable.
+                        """
+                        
+                        analysis_response = client.chat.completions.create(
+                            model="gpt-4-0613",
+                            messages=[{"role": "user", "content": analysis_prompt}]
+                        )
                         
                         # Botón de descarga
                         csv = df_result.to_csv(index=False)
