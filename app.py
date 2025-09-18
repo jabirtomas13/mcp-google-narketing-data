@@ -520,4 +520,4 @@ st.markdown("""
 📊 Datos obtenidos directamente de Google Search Console via API oficial
 </small>
 </div>
-""
+""")
